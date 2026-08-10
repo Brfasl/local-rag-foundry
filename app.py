@@ -2,6 +2,7 @@ import streamlit as st
 from foundry_local_sdk import Configuration, FoundryLocalManager
 from openai import OpenAI
 from retrieval import get_relevant_chunks
+from ingest import save_uploaded_file  # Yeni eklenen modül
 
 st.set_page_config(page_title="Local RAG Foundry", page_icon="🤖", layout="wide")
 
@@ -17,47 +18,31 @@ def init_foundry():
     except Exception:
         manager = FoundryLocalManager.instance
 
-    # EP Kaydı
     try:
         manager.download_and_register_eps(["WebGpuExecutionProvider"])
     except Exception:
         pass
 
-    # Model Nesnesini Liste İçinden Bulma
     selected_model_id = "phi-1.5-mini"
     try:
         all_models = manager.catalog.list_models()
-        # Qwen 0.5b veya ilk kullanılabilir modeli seçelim
         target_models = [m for m in all_models if "qwen2.5-0.5b" in str(m.id)]
         model_obj = target_models[0] if target_models else all_models[0]
         selected_model_id = model_obj.id
 
-        # İndirme ve Belleğe Yükleme
         if hasattr(model_obj, "is_cached") and not model_obj.is_cached:
             model_obj.download()
-        else:
-            try:
-                model_obj.download()
-            except Exception:
-                pass
 
         if hasattr(model_obj, "is_loaded") and not model_obj.is_loaded:
             model_obj.load()
-        else:
-            try:
-                model_obj.load()
-            except Exception:
-                pass
     except Exception as err:
         st.sidebar.warning(f"Model hazırlık uyarısı: {err}")
 
-    # Web Servisini Başlatma
     try:
         manager.start_web_service()
     except Exception:
         pass
 
-    # URL Temizleme
     urls = manager.urls
     raw_url = ""
 
@@ -86,11 +71,26 @@ except Exception as e:
     client = None
     active_model_id = "phi-1.5-mini"
 
+# Sol Menü: Doküman Yükleme Alanı
+st.sidebar.markdown("---")
+st.sidebar.header("📂 Veritabanına Doküman Ekle")
+uploaded_file = st.sidebar.file_uploader("PDF veya TXT dosyası seçin", type=["pdf", "txt"])
+
+if uploaded_file is not None:
+    if st.sidebar.button("Veritabanına İşle", type="secondary"):
+        with st.sidebar.spinner("Metinler işleniyor..."):
+            bytes_data = uploaded_file.getvalue()
+            num_chunks = save_uploaded_file(bytes_data, uploaded_file.name)
+            if num_chunks > 0:
+                st.sidebar.success(f"🎉 `{uploaded_file.name}` veritabanına eklendi! ({num_chunks} parça)")
+            else:
+                st.sidebar.error("Dosyadan okunabilir metin çıkarılamadı.")
+
 # 2. Kullanıcı Arayüzü ve Soru Yanıt Hattı
-query = st.text_input("Sorunuzu girin:", placeholder="Örn: Foundry Local ne işe yarar?")
+query = st.text_input("Sorunuzu girin:", placeholder="Örn: Yüklediğin dokümandan bir detay sor...")
 
 if st.button("Sor", type="primary") and query:
-    chunks = get_relevant_chunks(query, top_k=2)
+    chunks = get_relevant_chunks(query, top_k=3)
     context_text = "\n".join(chunks) if chunks else "İlgili kaynak bulunamadı."
 
     with st.expander("📚 Veritabanından Bulunan Kaynak Metinler (Context)", expanded=True):

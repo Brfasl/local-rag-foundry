@@ -1,49 +1,49 @@
 import sqlite3
-import os
+import io
+from pypdf import PdfReader
 
-# 1. Veritabanı Bağlantısını Oluşturma
-DB_NAME = "veritabani.db"
+def extract_text_from_pdf(file_bytes):
+    reader = PdfReader(io.BytesIO(file_bytes))
+    text = ""
+    for page in reader.pages:
+        extracted = page.extract_text()
+        if extracted:
+            text += extracted + "\n"
+    return text
 
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
+def chunk_text(text, chunk_size=300, overlap=50):
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size - overlap):
+        chunk = " ".join(words[i:i + chunk_size])
+        if chunk.strip():
+            chunks.append(chunk)
+    return chunks
+
+def save_uploaded_file(file_bytes, file_name, db_path="rag_data.db"):
+    if file_name.endswith(".pdf"):
+        text = extract_text_from_pdf(file_bytes)
+    else:
+        text = file_bytes.decode("utf-8", errors="ignore")
+
+    chunks = chunk_text(text)
+    if not chunks:
+        return 0
+
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    # Metin parçalarını saklayacağımız tabloyu oluşturuyoruz
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS dokumanlar (
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            metin TEXT NOT NULL
+            source TEXT,
+            chunk TEXT
         )
-    ''')
-    conn.commit()
-    conn.close()
-    print("SQLite veritabanı ve tablo hazırlandı.")
-
-# 2. Dokümanı Okuma ve Parçalara Bölme (Chunking)
-def process_and_save_data(file_path):
-    if not os.path.exists(file_path):
-        print(f"Hata: {file_path} dosyası bulunamadı!")
-        return
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        text = f.read()
-
-    # Metni noktalara göre cümlelere/parçalara bölüyoruz
-    chunks = [c.strip() for c in text.split(".") if len(c.strip()) > 10]
-
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
-    # Önceki verileri temizleyelim (tekrar çalıştırmalarda mükerrer kayıt olmasın)
-    cursor.execute("DELETE FROM dokumanlar")
+    """)
 
     for chunk in chunks:
-        cursor.execute("INSERT INTO dokumanlar (metin) VALUES (?)", (chunk,))
+        cursor.execute("INSERT INTO documents (source, chunk) VALUES (?, ?)", (file_name, chunk))
 
     conn.commit()
     conn.close()
-    print(f"Toplam {len(chunks)} metin parçası veritabanına başarıyla kaydedildi.")
-
-if __name__ == "__main__":
-    init_db()
-    process_and_save_data("data/bilgiler.txt")
-    
+    return len(chunks)
