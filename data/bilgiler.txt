@@ -1,0 +1,1 @@
+Microsoft Foundry Local, dil modellerini tamamen yerel cihazda (offline) calistirmaya yarayan bir SDK ve runtime sunar. RAG mimarisi ise harici dokumanlardan bilgi cekerek yapay zekanin dogru cevaplar uretmesini saglar.
