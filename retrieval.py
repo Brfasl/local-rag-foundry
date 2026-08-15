@@ -1,6 +1,6 @@
 import sqlite3
 
-def get_relevant_chunks(query, top_k=3, db_path="rag_data.db"):
+def get_relevant_chunks(query, top_k=4, db_path="rag_data.db"):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     try:
@@ -13,9 +13,28 @@ def get_relevant_chunks(query, top_k=3, db_path="rag_data.db"):
     if not rows:
         return []
 
-    chunks = [row[0] for row in rows if any(word.lower() in row[0].lower() for word in query.split())]
-    if not chunks:
-        chunks = [row[0] for row in rows[:top_k]]
+    query_words = [w.lower() for w in query.split() if len(w) > 1]
+    
+    scored_chunks = []
+    for row in rows:
+        chunk_text = row[0]
+        chunk_lower = chunk_text.lower()
+        score = sum(1 for word in query_words if word in chunk_lower)
+        scored_chunks.append((score, chunk_text))
+
+    scored_chunks.sort(key=lambda x: x[0], reverse=True)
+
+    matching_chunks = [chunk for score, chunk in scored_chunks if score > 0]
+
+    if matching_chunks:
+        if len(matching_chunks) < top_k:
+            remaining_chunks = [chunk for score, chunk in scored_chunks if score == 0]
+            chunks = matching_chunks + remaining_chunks[: (top_k - len(matching_chunks))]
+        else:
+            chunks = matching_chunks[:top_k]
+    else:
+        chunks = [chunk for score, chunk in scored_chunks[:top_k]]
+
     return chunks[:top_k]
 
 def get_all_chunks(db_path="rag_data.db"):

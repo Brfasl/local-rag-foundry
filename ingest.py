@@ -83,6 +83,72 @@ def setup_database(db_path="rag_data.db"):
     conn.commit()
     conn.close()
 
+def chunk_text_smart(text, target_size=400, overlap=50):
+    if not text:
+        return []
+    
+    # Cümle veya paragraf sonlarına göre böl
+    sentences = re.split(r'(?<=[.!?\n])\s+', text)
+    chunks = []
+    current_chunk = []
+    current_length = 0
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+            
+        # Çok uzun tek bir cümle varsa kelime kelime böl
+        if len(sentence) > target_size:
+            words = sentence.split()
+            w_chunk = []
+            w_len = 0
+            for w in words:
+                if w_len + len(w) + 1 > target_size and w_chunk:
+                    chunk_str = " ".join(w_chunk)
+                    chunks.append(chunk_str)
+                    # Overlap için son kelimeleri koru
+                    overlap_words = []
+                    o_len = 0
+                    for ow in reversed(w_chunk):
+                        if o_len + len(ow) + 1 <= overlap:
+                            overlap_words.insert(0, ow)
+                            o_len += len(ow) + 1
+                        else:
+                            break
+                    w_chunk = overlap_words + [w]
+                    w_len = sum(len(x) + 1 for x in w_chunk)
+                else:
+                    w_chunk.append(w)
+                    w_len += len(w) + 1
+            if w_chunk:
+                chunks.append(" ".join(w_chunk))
+            continue
+
+        if current_length + len(sentence) + 1 > target_size and current_chunk:
+            chunk_str = " ".join(current_chunk)
+            chunks.append(chunk_str)
+
+            # Overlap için son cümleleri koru
+            overlap_sentences = []
+            o_len = 0
+            for s in reversed(current_chunk):
+                if o_len + len(s) + 1 <= overlap:
+                    overlap_sentences.insert(0, s)
+                    o_len += len(s) + 1
+                else:
+                    break
+            current_chunk = overlap_sentences + [sentence]
+            current_length = sum(len(x) + 1 for x in current_chunk)
+        else:
+            current_chunk.append(sentence)
+            current_length += len(sentence) + 1
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+
+    return [c for c in chunks if c.strip()]
+
 def save_uploaded_file(bytes_data, filename, db_path="rag_data.db"):
     # Tablo kontrolünü yap ve hazırla
     setup_database(db_path)
@@ -97,8 +163,7 @@ def save_uploaded_file(bytes_data, filename, db_path="rag_data.db"):
     if not clean_text:
         return 0
 
-    chunk_size = 600
-    chunks = [clean_text[i:i + chunk_size] for i in range(0, len(clean_text), chunk_size - 50)]
+    chunks = chunk_text_smart(clean_text, target_size=400, overlap=50)
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
