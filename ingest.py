@@ -1,6 +1,10 @@
 import io
+import os
 import re
 import sqlite3
+
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rag_data.db")
+
 
 def extract_text_from_pdf(bytes_data):
     # 1. Öncelik: pdfplumber (En temiz metin okuyan kütüphane)
@@ -33,6 +37,35 @@ def extract_text_from_pdf(bytes_data):
 
     return bytes_data.decode("utf-8", errors="ignore")
 
+
+def extract_text_from_docx(bytes_data):
+    # 1. Öncelik: python-docx
+    try:
+        import docx
+        doc = docx.Document(io.BytesIO(bytes_data))
+        text = "\n".join([p.text for p in doc.paragraphs if p.text])
+        if text.strip():
+            return text
+    except Exception:
+        pass
+
+    # 2. Öncelik: Dahili zipfile ve ElementTree (kütüphane bağımsız XML okuma)
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(io.BytesIO(bytes_data)) as z:
+            xml_content = z.read('word/document.xml')
+            tree = ET.fromstring(xml_content)
+            texts = []
+            for elem in tree.iter():
+                if elem.tag.endswith('}t') and elem.text:
+                    texts.append(elem.text)
+            return " ".join(texts)
+    except Exception:
+        pass
+
+    return ""
+
 def fix_spaced_text(text):
     if not text:
         return ""
@@ -60,8 +93,8 @@ def fix_spaced_text(text):
 
     return re.sub(r'\s+', ' ', text).strip()
 
-def setup_database(db_path="rag_data.db"):
-    conn = sqlite3.connect(db_path)
+def setup_database(db_path=DB_PATH):
+    conn = sqlite3.connect(db_path, timeout=10)
     cursor = conn.cursor()
     
     # 'documents' tablosunda 'filename' sütununun olup olmadığını güvenli şekilde kontrol et
@@ -149,12 +182,15 @@ def chunk_text_smart(text, target_size=400, overlap=50):
 
     return [c for c in chunks if c.strip()]
 
-def save_uploaded_file(bytes_data, filename, db_path="rag_data.db"):
+def save_uploaded_file(bytes_data, filename, db_path=DB_PATH):
     # Tablo kontrolünü yap ve hazırla
     setup_database(db_path)
 
-    if filename.lower().endswith(".pdf"):
+    fn_lower = filename.lower()
+    if fn_lower.endswith(".pdf"):
         raw_text = extract_text_from_pdf(bytes_data)
+    elif fn_lower.endswith(".docx") or fn_lower.endswith(".doc"):
+        raw_text = extract_text_from_docx(bytes_data)
     else:
         raw_text = bytes_data.decode("utf-8", errors="ignore")
 
@@ -165,7 +201,7 @@ def save_uploaded_file(bytes_data, filename, db_path="rag_data.db"):
 
     chunks = chunk_text_smart(clean_text, target_size=400, overlap=50)
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     cursor = conn.cursor()
 
     for chunk in chunks:
@@ -176,3 +212,12 @@ def save_uploaded_file(bytes_data, filename, db_path="rag_data.db"):
     conn.close()
 
     return len(chunks)
+    
+if __name__ == "__main__":
+    setup_database()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM documents")
+    count = c.fetchone()[0]
+    conn.close()
+    print(f"✅ Ingest servisi hazır! Veritabanında şu an {count} adet doküman parçası (chunk) mevcut.")

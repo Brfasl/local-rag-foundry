@@ -1,14 +1,17 @@
+import re
 import sqlite3
 import streamlit as st
 from foundry_local_sdk import Configuration, FoundryLocalManager
 from openai import OpenAI
 from retrieval import get_relevant_chunks, get_all_chunks
+
 from ingest import save_uploaded_file
 
 st.set_page_config(page_title="Local RAG Foundry", page_icon="🤖", layout="wide")
 
-st.title("🤖 Local RAG Foundry Asistanı")
-st.caption("Yerel Cihazda Çalışan SQLite + Foundry Local Destekli RAG Uygulaması")
+# ─────────────────────────────────────────────
+# Yardımcı Fonksiyonlar
+# ─────────────────────────────────────────────
 
 def reset_database(db_path="rag_data.db"):
     try:
@@ -21,7 +24,30 @@ def reset_database(db_path="rag_data.db"):
     except Exception:
         return False
 
+
+def clean_llm_output(text: str) -> str:
+    text = re.sub(r'!{2,}', '!', text)
+    text = re.sub(r'\.{3,}', '.', text)
+    return text.strip()
+
+
+def clean_repetitive_text(text: str) -> str:
+    """Modelden gelen metindeki tekrarlayan cümleleri siler."""
+    sentences = text.split('.')
+    seen = set()
+    cleaned = []
+    for s in sentences:
+        s_strip = s.strip()
+        if s_strip and s_strip not in seen:
+            seen.add(s_strip)
+            cleaned.append(s_strip)
+    return '. '.join(cleaned) + '.' if cleaned else text
+
+
+# ─────────────────────────────────────────────
 # 1. Foundry Local Servisi ve Model Yükleme
+# ─────────────────────────────────────────────
+
 @st.cache_resource
 def init_foundry():
     try:
@@ -33,22 +59,36 @@ def init_foundry():
     try:
         manager.download_and_register_eps(["WebGpuExecutionProvider"])
     except Exception:
-        pass
+        selected_model_id = "qwen2.5-7b-instruct-generic-gpu:4"
 
-    selected_model_id = "phi-1.5-mini"
     try:
         all_models = manager.catalog.list_models()
-        target_models = [m for m in all_models if "qwen2.5-1.5b" in str(m.id)]
-        model_obj = target_models[0] if target_models else all_models[0]
+        preferred_candidates = [
+            "qwen2.5-1.5b-instruct",
+            "qwen2.5-coder-1.5b-instruct",
+            "qwen2.5-0.5b-instruct",
+            "qwen2.5-7b-instruct"
+        ]
+
+        chosen_model = None
+        for pref in preferred_candidates:
+            matches = [m for m in all_models if pref in str(m.id)]
+            if matches:
+                chosen_model = matches[0]
+                break
+
+        model_obj = chosen_model if chosen_model else all_models[0]
         selected_model_id = model_obj.id
 
         if hasattr(model_obj, "is_cached") and not model_obj.is_cached:
-            model_obj.download()
+            with st.spinner(f"Akil Model Indiriliyor ({selected_model_id})... Lutfen bekleyin."):
+                model_obj.download()
 
         if hasattr(model_obj, "is_loaded") and not model_obj.is_loaded:
-            model_obj.load()
+            with st.spinner(f"Model Yukleniyor ({selected_model_id})..."):
+                model_obj.load()
     except Exception as err:
-        st.sidebar.warning(f"Model hazırlık uyarısı: {err}")
+        st.sidebar.warning(f"Model hazirlik uyarisi: {err}")
 
     try:
         manager.start_web_service()
@@ -67,162 +107,272 @@ def init_foundry():
 
     raw_url = raw_url.strip("[]'\" ").rstrip("/")
     if not raw_url or raw_url == "None":
-        raise ValueError("Servis URL adresi bulunamadı.")
+        raise ValueError("Servis URL adresi bulunamadi.")
 
     base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
-
     client = OpenAI(base_url=base_url, api_key="foundry")
     return client, base_url, selected_model_id
 
+
 try:
     client, active_url, active_model_id = init_foundry()
-    st.sidebar.success(f"✅ Foundry Servisi Aktif\n\n`{active_url}`")
-    st.sidebar.info(f"🧠 Aktif Model:\n`{active_model_id}`")
 except Exception as e:
-    st.sidebar.error(f"❌ Servis Hatası: {e}")
+    st.sidebar.error(f"Servis Hatasi: {e}")
     client = None
-    active_model_id = "phi-1.5-mini"
-
-# Sol Menü
-st.sidebar.markdown("---")
-st.sidebar.header("📂 Veritabanı ve Özet")
-
-if st.sidebar.button("🗑️ Veritabanını Temizle", type="secondary"):
-    if reset_database():
-        st.sidebar.success("Veritabanı temizlendi!")
-        st.rerun()
-    else:
-        st.sidebar.error("Veritabanı temizlenirken bir hata oluştu.")
-
-uploaded_file = st.sidebar.file_uploader("PDF veya TXT dosyası seçin", type=["pdf", "txt"])
-
-if uploaded_file is not None:
-    if st.sidebar.button("Veritabanına İşle", type="secondary"):
-        with st.sidebar.spinner("Metinler işleniyor..."):
-            bytes_data = uploaded_file.getvalue()
-            num_chunks = save_uploaded_file(bytes_data, uploaded_file.name)
-            if num_chunks > 0:
-                st.sidebar.success(f"🎉 `{uploaded_file.name}` veritabanına eklendi! ({num_chunks} parça)")
-                st.rerun()
-            else:
-                st.sidebar.error("Dosyadan okunabilir metin çıkarılamadı.")
-
-# Veritabanında ne var ne yok kontrol etmek için
-all_chunks = get_all_chunks()
-if all_chunks:
-    with st.expander("🔍 Veritabanındaki Ham Metin Parçaları (Okunan Metin)", expanded=False):
-        for idx, ch in enumerate(all_chunks, 1):
-            st.text(f"Parça {idx}:\n{ch[:300]}...\n")
-
-# TÜM DOKÜMANI ÖZETLE BUTONU
-if st.sidebar.button("📑 Tüm Dokümanı Özetle", type="primary"):
-    if not all_chunks:
-        st.sidebar.error("Veritabanında özetlenecek doküman bulunamadı.")
-    else:
-        context_sample = "\n".join(all_chunks)[:1500]
-        
-        user_summary_prompt = (
-            f"Aşağıdaki CV metnini oku ve SADECE TÜRKÇE olarak maddeler halinde özetle:\n\n"
-            f"{context_sample}\n\n"
-            f"TÜRKÇE ÖZET:"
-        )
-        
-        with st.spinner("Özet çıkartılıyor..."):
-            try:
-                response = client.chat.completions.create(
-                    model=active_model_id,
-                    messages=[
-                        {
-                            "role": "system", 
-                            "content": "Sen sadece Türkçe konuşan bir asistansın. Başka hiçbir dil (Japonca, Çince, İngilizce) kullanma. Tüm yanıtlarını kesinlikle Türkçe ver."
-                        },
-                        {
-                            "role": "user", 
-                            "content": user_summary_prompt
-                        }
-                    ],
-                    temperature=0.1,
-                    max_tokens=300,
-                    stream=False
-                )
-                summary_text = response.choices[0].message.content
-                
-                if "messages" not in st.session_state:
-                    st.session_state.messages = []
-                st.session_state.messages.append({"role": "assistant", "content": f"### 📑 Doküman Özeti\n\n{summary_text}"})
-                st.rerun()
-            except Exception as err:
-                st.error(f"Özet çıkarma hatası: {err}")
+    active_model_id = "qwen2.5-7b-instruct-generic-gpu:4"
 
 
+# ─────────────────────────────────────────────
+# 2. Sohbet Gecmisi Baslatma
+# ─────────────────────────────────────────────
 
-# 2. Sohbet Geçmişi Yönetimi
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if st.sidebar.button("🗑️ Sohbet Geçmişini Temizle"):
+if "ingested_files" not in st.session_state:
+    st.session_state.ingested_files = set()
+
+
+# ─────────────────────────────────────────────
+# 3. Sol Menu (Sidebar)
+# ─────────────────────────────────────────────
+
+# 3a. Dokuman Yonetimi
+st.sidebar.markdown("## 📂 Doküman Yönetimi")
+
+uploaded_files = st.sidebar.file_uploader(
+    "PDF, DOCX veya TXT dosyası seçin",
+    type=["pdf", "txt", "docx", "doc"],
+    accept_multiple_files=True,
+    label_visibility="collapsed"
+)
+
+# Otomatik ingest: her yeni dosyayi aninda isle
+if uploaded_files:
+    newly_ingested = []
+    for uf in uploaded_files:
+        file_key = f"{uf.name}_{uf.size}"
+        if file_key not in st.session_state.ingested_files:
+            # Yeni dosya yüklenmeden önce eski veritabanı kayıtlarını temizle
+            reset_database()
+            st.session_state.ingested_files = set()
+
+            file_bytes = uf.read()
+            chunks_count = save_uploaded_file(file_bytes, uf.name)
+            if chunks_count > 0:
+                st.session_state.ingested_files.add(file_key)
+                newly_ingested.append((uf.name, chunks_count))
+
+    if newly_ingested:
+        # Sadece toast göster — sohbet alanına mesaj ekleme
+        st.toast("Dokümanlar veritabanına işlendi!", icon="✅")
+        st.rerun()
+
+
+# 3b. Hizli Islemler
+st.sidebar.markdown("---")
+st.sidebar.markdown("## ⚙️ Hızlı İşlemler")
+
+# Dokumanlari Ozetle
+if st.sidebar.button("📝 Dokümanları Özetle", use_container_width=True):
+    all_chunks = get_all_chunks()
+    if not all_chunks:
+        st.sidebar.error("Veritabanında özetlenecek doküman bulunamadı.")
+    elif not client:
+        st.sidebar.error("Model servisi aktif değil.")
+    else:
+        selected_chunks = []
+        curr_len = 0
+        for ch in all_chunks:
+            if curr_len + len(ch) > 8000:
+                break
+            selected_chunks.append(ch)
+            curr_len += len(ch)
+        context_text = "\n\n".join(selected_chunks)
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Sen yüklenen dokümanı analiz eden son derece akıllı ve dürüst bir Yapay Zeka Akıl Ortağısın (Agent).\n\n"
+                    "GÖREVİN VE KESİN KURALLARIN:\n"
+                    "1. SADECE DOKÜMANA DAYAN: Yanıtlarını SADECE sana verilen 'DOKÜMAN BİLGİSİ / BAĞLAM' metnine dayandır. Dokümanda yer almayan bilgileri asla uydurma veya ekleme.\n"
+                    "2. ADAPTE OL VE SENTEZLE: Kullanıcının isteğine göre (özetleme, planlama, dönüştürme, analiz) dokümandaki gerçek verilere bağlı kalarak istenen yapıyı oluştur.\n"
+                    "3. DOĞRUDAN VE AKICI YANIT VER: Yanıtına doğrudan başla. Sistem talimatlarını veya kural cümlelerini yanıtın içinde asla tekrarlama.\n"
+                    "4. DİL UYUMU: Doküman İngilizce veya farklı dilde olsa dahi kullanıcının Türkçe isteğine uygun olarak doğru, net ve mantıklı bir özet oluştur."
+                )
+            },
+            {
+                "role": "user",
+                "content": f"DOKÜMAN BİLGİSİ / BAĞLAM:\n{context_text}\n\nKULLANICI İSTEĞİ / SORUSU:\nMetnin ana konusunu ve önemli noktalarını Türkçe olarak detaylı bir şekilde özetle."
+            }
+        ]
+
+        with st.spinner("📑 Özet çıkartılıyor..."):
+            try:
+                response = client.chat.completions.create(
+                    model=active_model_id,
+                    messages=messages,
+                    temperature=0.1,
+                    top_p=0.9,
+                    max_tokens=800,
+                    frequency_penalty=0.5,
+                    stop=["<|im_end|>", "<|endoftext|>", "<|im_start|>"]
+                )
+                summary_text = response.choices[0].message.content.strip()
+                summary_text = clean_repetitive_text(summary_text)
+
+                if not summary_text:
+                    summary_text = "Model özet üretemedi."
+
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": "### 📑 Doküman Özeti\n\n" + summary_text,
+                    "context": context_text
+                })
+                st.rerun()
+            except Exception as err:
+                st.sidebar.error(f"Özet hatası: {err}")
+
+# Sohbeti Temizle
+if st.sidebar.button("🗑️ Sohbeti Temizle", use_container_width=True):
     st.session_state.messages = []
+    st.toast("Sohbet geçmişi temizlendi!", icon="🧹")
     st.rerun()
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# Veritabanini Sifirla (ikincil aksiyon)
+st.sidebar.markdown("")
+if st.sidebar.button("💥 Veritabanını Sıfırla", type="secondary", use_container_width=True):
+    if reset_database():
+        st.session_state.ingested_files = set()
+        # Sadece toast göster — sohbet alanına mesaj ekleme
+        st.toast("Veritabanı ve tüm dokümanlar temizlendi!", icon="🗑️")
+        st.rerun()
+    else:
+        st.sidebar.error("Veritabanı sıfırlanırken bir hata oluştu.")
 
-# 3. Chat Input ve Akış
+
+# 3c. Sohbet Gecmisi (Sidebar)
+st.sidebar.markdown("---")
+st.sidebar.markdown("## 💬 Sohbet Geçmişi")
+
+if st.session_state.messages:
+    with st.sidebar.expander(f"📜 {len(st.session_state.messages)} mesaj", expanded=False):
+        for msg in st.session_state.messages[-10:]:
+            role_icon = "🧑" if msg["role"] == "user" else "🤖"
+            preview = msg["content"][:60].replace("\n", " ")
+            st.caption(f"{role_icon} {preview}...")
+else:
+    st.sidebar.caption("Henuz sohbet gecmisi yok.")
+
+
+# ─────────────────────────────────────────────
+# 4. Ana Sohbet Alanı
+# ─────────────────────────────────────────────
+
+st.title("🤖 Local RAG Foundry Asistanı")
+st.caption("Yerel Cihazda Çalışan SQLite + Foundry Local Destekli RAG Uygulaması")
+
+# ── Geçmiş mesajları render et ──────────────────
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        # Kaydedilmiş context varsa expander olarak göster
+        if msg.get("context"):
+            with st.expander("📚 Kullanılan Kaynak Metinler (Context)", expanded=False):
+                st.write(msg["context"])
+
+# ── Yeni soru alma ve işleme ────────────────────
 if prompt := st.chat_input("Sorunuzu yazın..."):
-    st.chat_message("user").markdown(prompt)
+
+    # 1. Sorguya özel en alakalı 5 chunk'ı çek (top_k=5)
+    relevant_chunks = get_relevant_chunks(prompt, top_k=5)
+    # Mükerrer (aynı) chunk'ları ayıkla — sıra korunarak
+    seen = set()
+    unique_chunks = []
+    for ch in relevant_chunks:
+        if ch not in seen:
+            seen.add(ch)
+            unique_chunks.append(ch)
+    relevant_chunks = unique_chunks
+    if relevant_chunks:
+        context_text = "\n\n".join(relevant_chunks)
+    else:
+        context_text = "Yüklenmiş doküman bulunmamaktadır."
+
+    # 2. System prompt — sertleştirilmiş, halüsinasyona karşı korumalı
+    sys_prompt = (
+        "Sen sadece sana sağlanan [BAĞLAM] içindeki metinleri kullanan bir asistansın. "
+        "[BAĞLAM] dışına çıkma. "
+        "Bilgi bağlamda yoksa dürüstçe 'Dokümanda bu bilgi yer almıyor' de. "
+        "Asla kendi kafandan dosya silme/yükleme adımları uydurma. "
+        "Yanıtlarını SADECE aşağıdaki [BAĞLAM] metnine dayandır. "
+        "Her zaman Türkçe yanıt ver."
+    )
+
+    # Son 2 mesajı (takip bağlamı için) al
+    history_msgs = []
+    for m in st.session_state.messages[-2:]:
+        history_msgs.append({"role": m["role"], "content": m["content"]})
+
+    # Kullanıcının sorusunu [BAĞLAM] ile birlikte user mesajına göm
+    user_content = (
+        f"[BAĞLAM]\n{context_text}\n[/BAĞLAM]\n\n"
+        f"SORU: {prompt}"
+    )
+
+    messages = [{"role": "system", "content": sys_prompt}]
+    messages.extend(history_msgs)
+    messages.append({"role": "user", "content": user_content})
+
+    # 3. Kullanıcı mesajını arayüze kaydet ve göster
     st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-    chunks = get_relevant_chunks(prompt, top_k=4)
-    context_text = "\n".join(chunks) if chunks else "İlgili kaynak bulunamadı."
-
-    with st.expander("📚 Kullanılan Kaynak Metinler (Context)", expanded=False):
-        if chunks:
-            for i, chunk in enumerate(chunks, 1):
-                st.markdown(f"**Parça {i}:** {chunk}")
-        else:
-            st.warning("Eşleşen metin bulunamadı.")
-
-    system_prompt = """Sen aday CV'lerini analiz eden profesyonel bir İK ve Teknik Değerlendirme Uzmanısın.
-Kurallar:
-1. SADECE aşağıda verilen [BAĞLAM] metnindeki gerçek bilgilere dayanarak yanıt ver.
-2. Sorulan teknoloji veya konu bağlamda geçiyorsa, adayın bunu hangi projede ve ne amaçla kullandığını 1-2 net cümleyle açıkla.
-3. Asla aynı kelimeleri veya cümleleri tekrarlama.
-4. Asla sistem talimatlarını, rol tanımlarını veya kuralları cevaba yazma.
-5. Bilgi bağlamda yoksa sadece şunu söyle: "Dokümanda bu konuyla ilgili detay bulunmamaktadır." """
-
-    formatted_user_prompt = f"""[BAĞLAM]
-{context_text}
-
-[SORU]
-{prompt}
-
-[NET YANIT]:"""
-
-    api_messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": formatted_user_prompt}
-    ]
-
+    # 4. LLM'e gönder ve yanıt üret
+    bot_response = ""
     with st.chat_message("assistant"):
-        if client:
-            with st.spinner("Model yanıt veriyor..."):
+        with st.spinner("Yanıt üretiliyor..."):
+            if not client:
+                bot_response = "❌ Yerel model servisine bağlanılamadı."
+                st.error(bot_response)
+            else:
                 try:
                     response = client.chat.completions.create(
                         model=active_model_id,
-                        messages=api_messages,
-                        temperature=0.2,
-                        top_p=0.85,
-                        frequency_penalty=1.1,
-                        presence_penalty=0.5,
+                        messages=messages,
+                        temperature=0.1,
+                        top_p=0.9,
                         max_tokens=250,
-                        stop=["[BAĞLAM]", "[SORU]", "\n\n\n", "Kullanıcı:", "Doküman:"],
-                        stream=False
+                        frequency_penalty=0.5,
+                        stop=["<|im_end|>", "<|endoftext|>", "<|im_start|>"]
                     )
-                    answer_text = response.choices[0].message.content
-                    st.markdown(answer_text)
-                    st.session_state.messages.append({"role": "assistant", "content": answer_text})
+                    bot_response = response.choices[0].message.content.strip()
+                    bot_response = clean_repetitive_text(bot_response)
+
+                    if not bot_response:
+                        bot_response = "Model boş yanıt döndürdü. Lütfen tekrar deneyin."
+
                 except Exception as err:
-                    st.error(f"Model Yanıt Hatası: {err}")
-        else:
-            st.error("Yerel model servisine bağlanılamadı.")
+                    bot_response = f"❌ Model Yanıt Hatası: {err}"
+                    st.error(bot_response)
+
+        # 5. Bot yanıtını ekrana bas
+        st.markdown(bot_response)
+
+        # 6. Referans alınan metin parçalarını şeffaf şekilde göster
+        if relevant_chunks:
+            with st.expander("📄 Referans Alınan Metin Parçaları"):
+                for i, chunk in enumerate(relevant_chunks, 1):
+                    st.markdown(f"**Parça {i}:**")
+                    st.caption(chunk)
+                    if i < len(relevant_chunks):
+                        st.divider()
+
+    # 7. Asistan yanıtını geçmişe kaydet
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": bot_response,
+        "context": context_text
+    })

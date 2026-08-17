@@ -1,7 +1,11 @@
+import os
 import sqlite3
 
-def get_relevant_chunks(query, top_k=4, db_path="rag_data.db"):
-    conn = sqlite3.connect(db_path)
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rag_data.db")
+
+def get_relevant_chunks(query, top_k=5, db_path=DB_PATH):
+    conn = sqlite3.connect(db_path, timeout=10)
+
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT chunk FROM documents")
@@ -37,8 +41,8 @@ def get_relevant_chunks(query, top_k=4, db_path="rag_data.db"):
 
     return chunks[:top_k]
 
-def get_all_chunks(db_path="rag_data.db"):
-    conn = sqlite3.connect(db_path)
+def get_all_chunks(db_path=DB_PATH):
+    conn = sqlite3.connect(db_path, timeout=10)
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT chunk FROM documents")
