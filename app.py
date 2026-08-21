@@ -227,8 +227,7 @@ if st.sidebar.button("📝 Dokümanları Özetle", use_container_width=True):
 
                 st.session_state.messages.append({
                     "role": "assistant",
-                    "content": "### 📑 Doküman Özeti\n\n" + summary_text,
-                    "context": context_text
+                    "content": summary_text
                 })
                 st.rerun()
             except Exception as err:
@@ -277,10 +276,6 @@ st.caption("Yerel Cihazda Çalışan SQLite + Foundry Local Destekli RAG Uygulam
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        # Kaydedilmiş context varsa expander olarak göster
-        if msg.get("context"):
-            with st.expander("📚 Kullanılan Kaynak Metinler (Context)", expanded=False):
-                st.write(msg["context"])
 
 # ── Yeni soru alma ve işleme ────────────────────
 if prompt := st.chat_input("Sorunuzu yazın..."):
@@ -300,14 +295,17 @@ if prompt := st.chat_input("Sorunuzu yazın..."):
     else:
         context_text = "Yüklenmiş doküman bulunmamaktadır."
 
-    # 2. System prompt — sertleştirilmiş, halüsinasyona karşı korumalı
+    # 2. System prompt — analiz odaklı, ham metin kopyalamayı yasaklayan
     sys_prompt = (
-        "Sen sadece sana sağlanan [BAĞLAM] içindeki metinleri kullanan bir asistansın. "
-        "[BAĞLAM] dışına çıkma. "
-        "Bilgi bağlamda yoksa dürüstçe 'Dokümanda bu bilgi yer almıyor' de. "
-        "Asla kendi kafandan dosya silme/yükleme adımları uydurma. "
-        "Yanıtlarını SADECE aşağıdaki [BAĞLAM] metnine dayandır. "
-        "Her zaman Türkçe yanıt ver."
+        "Sen kıdemli bir Yazılım Mimarı ve Teknik Asistansın.\n\n"
+        "GÖREVİN:\n"
+        "Kullanıcının sorduğu teknik soruyu, dokümanda geçen teknolojileri "
+        "(React Native, REST API, Laravel, MySQL) temel alarak ANALİZ ET ve ADIM ADIM AÇIKLA.\n\n"
+        "KESİN KURALLAR:\n"
+        "1. CV'deki ham paragraf, 'Beceriler' veya 'Projeler' metinlerini SAKIN kopyalayıp ekrana basma.\n"
+        "2. Sorulan haberleşme akışını mühendislik mantığıyla adım adım kurgula "
+        "(Örn: Adım 1: Mobil İstek, Adım 2: API Doğrulama, Adım 3: Laravel/MySQL Veri İşleme).\n"
+        "3. Yanıtında başlık olarak 'Doküman Özeti' ifadesini KESİNLİKLE kullanma."
     )
 
     # Son 2 mesajı (takip bağlamı için) al
@@ -315,10 +313,10 @@ if prompt := st.chat_input("Sorunuzu yazın..."):
     for m in st.session_state.messages[-2:]:
         history_msgs.append({"role": m["role"], "content": m["content"]})
 
-    # Kullanıcının sorusunu [BAĞLAM] ile birlikte user mesajına göm
+    # Kullanıcının sorusunu doküman bilgisiyle birlikte user mesajına göm
     user_content = (
-        f"[BAĞLAM]\n{context_text}\n[/BAĞLAM]\n\n"
-        f"SORU: {prompt}"
+        f"DOKÜMAN TEKNOLOJİLERİ:\n{context_text[:2500]}\n\n"
+        f"SORU:\n{prompt}"
     )
 
     messages = [{"role": "system", "content": sys_prompt}]
@@ -342,11 +340,11 @@ if prompt := st.chat_input("Sorunuzu yazın..."):
                     response = client.chat.completions.create(
                         model=active_model_id,
                         messages=messages,
-                        temperature=0.1,
-                        top_p=0.9,
-                        max_tokens=250,
+                        temperature=0.3,
                         frequency_penalty=0.5,
-                        stop=["<|im_end|>", "<|endoftext|>", "<|im_start|>"]
+                        presence_penalty=0.2,
+                        max_tokens=650,
+                        stop=["<|im_end|>", "<|endoftext|>"]
                     )
                     bot_response = response.choices[0].message.content.strip()
                     bot_response = clean_repetitive_text(bot_response)
@@ -373,6 +371,5 @@ if prompt := st.chat_input("Sorunuzu yazın..."):
     # 7. Asistan yanıtını geçmişe kaydet
     st.session_state.messages.append({
         "role": "assistant",
-        "content": bot_response,
-        "context": context_text
+        "content": bot_response
     })
