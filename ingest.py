@@ -1,49 +1,223 @@
-import sqlite3
+import io
 import os
+import re
+import sqlite3
 
-# 1. Veritabanı Bağlantısını Oluşturma
-DB_NAME = "veritabani.db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rag_data.db")
 
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
+
+def extract_text_from_pdf(bytes_data):
+    # 1. Öncelik: pdfplumber (En temiz metin okuyan kütüphane)
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(bytes_data)) as pdf:
+            text = ""
+            for page in pdf.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + "\n"
+            if text.strip():
+                return text
+    except Exception:
+        pass
+
+    # 2. Öncelik: pypdf
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(bytes_data))
+        text = ""
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+        if text.strip():
+            return text
+    except Exception:
+        pass
+
+    return bytes_data.decode("utf-8", errors="ignore")
+
+
+def extract_text_from_docx(bytes_data):
+    # 1. Öncelik: python-docx
+    try:
+        import docx
+        doc = docx.Document(io.BytesIO(bytes_data))
+        text = "\n".join([p.text for p in doc.paragraphs if p.text])
+        if text.strip():
+            return text
+    except Exception:
+        pass
+
+    # 2. Öncelik: Dahili zipfile ve ElementTree (kütüphane bağımsız XML okuma)
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(io.BytesIO(bytes_data)) as z:
+            xml_content = z.read('word/document.xml')
+            tree = ET.fromstring(xml_content)
+            texts = []
+            for elem in tree.iter():
+                if elem.tag.endswith('}t') and elem.text:
+                    texts.append(elem.text)
+            return " ".join(texts)
+    except Exception:
+        pass
+
+    return ""
+
+def fix_spaced_text(text):
+    if not text:
+        return ""
+
+    # 'B e r f i n  A s l a n' veya harf harf ayrışmış metinleri birleştirme
+    # Tekil harflerin (boşlukla ayrılmış tek karakterler) yoğunluğunu kontrol et
+    words = text.split()
+    if not words:
+        return ""
+
+    single_letters = sum(1 for w in words if len(w) == 1 and w.isalnum())
+    if len(words) > 0 and (single_letters / len(words) > 0.25):
+        # Çift boşluk veya daha fazlasını kelime ayırıcı simgeye dönüştür
+        text_mod = re.sub(r' {2,}', ' [WORD_BOUND] ', text)
+        if '[WORD_BOUND]' in text_mod:
+            parts = text_mod.split('[WORD_BOUND]')
+            cleaned_parts = [re.sub(r'\s+', '', p) for p in parts]
+            text = " ".join(cleaned_parts)
+        else:
+            # Tekil boşluklarla harfleri birleştir
+            raw_merged = re.sub(r'\s+', '', text)
+            # Büyük harf/noktalama sınırlarında varsayılan ayırma yap
+            text = re.sub(r'(?<=[a-zçğıöşü0-9,.!?:;])(?=[A-ZÇĞİÖŞÜ])', ' ', raw_merged)
+            text = re.sub(r'(?<=[A-ZÇĞİÖŞÜ])(?=[A-ZÇĞİÖŞÜ][a-zçğıöşü])', ' ', text)
+
+    return re.sub(r'\s+', ' ', text).strip()
+
+def setup_database(db_path=DB_PATH):
+    conn = sqlite3.connect(db_path, timeout=10)
     cursor = conn.cursor()
-    # Metin parçalarını saklayacağımız tabloyu oluşturuyoruz
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS dokumanlar (
+    
+    # 'documents' tablosunda 'filename' sütununun olup olmadığını güvenli şekilde kontrol et
+    cursor.execute("PRAGMA table_info(documents)")
+    columns_info = cursor.fetchall()
+    column_names = [col[1] for col in columns_info]
+    
+    # Eğer tablo var ama 'filename' sütunu yoksa güvenli şekilde düşür (DROP TABLE IF EXISTS)
+    if columns_info and "filename" not in column_names:
+        cursor.execute("DROP TABLE IF EXISTS documents")
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            metin TEXT NOT NULL
+            filename TEXT,
+            chunk TEXT
         )
-    ''')
+    """)
     conn.commit()
     conn.close()
-    print("SQLite veritabanı ve tablo hazırlandı.")
 
-# 2. Dokümanı Okuma ve Parçalara Bölme (Chunking)
-def process_and_save_data(file_path):
-    if not os.path.exists(file_path):
-        print(f"Hata: {file_path} dosyası bulunamadı!")
-        return
+def chunk_text_smart(text, target_size=400, overlap=50):
+    if not text:
+        return []
+    
+    # Cümle veya paragraf sonlarına göre böl
+    sentences = re.split(r'(?<=[.!?\n])\s+', text)
+    chunks = []
+    current_chunk = []
+    current_length = 0
 
-    with open(file_path, "r", encoding="utf-8") as f:
-        text = f.read()
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+            
+        # Çok uzun tek bir cümle varsa kelime kelime böl
+        if len(sentence) > target_size:
+            words = sentence.split()
+            w_chunk = []
+            w_len = 0
+            for w in words:
+                if w_len + len(w) + 1 > target_size and w_chunk:
+                    chunk_str = " ".join(w_chunk)
+                    chunks.append(chunk_str)
+                    # Overlap için son kelimeleri koru
+                    overlap_words = []
+                    o_len = 0
+                    for ow in reversed(w_chunk):
+                        if o_len + len(ow) + 1 <= overlap:
+                            overlap_words.insert(0, ow)
+                            o_len += len(ow) + 1
+                        else:
+                            break
+                    w_chunk = overlap_words + [w]
+                    w_len = sum(len(x) + 1 for x in w_chunk)
+                else:
+                    w_chunk.append(w)
+                    w_len += len(w) + 1
+            if w_chunk:
+                chunks.append(" ".join(w_chunk))
+            continue
 
-    # Metni noktalara göre cümlelere/parçalara bölüyoruz
-    chunks = [c.strip() for c in text.split(".") if len(c.strip()) > 10]
+        if current_length + len(sentence) + 1 > target_size and current_chunk:
+            chunk_str = " ".join(current_chunk)
+            chunks.append(chunk_str)
 
-    conn = sqlite3.connect(DB_NAME)
+            # Overlap için son cümleleri koru
+            overlap_sentences = []
+            o_len = 0
+            for s in reversed(current_chunk):
+                if o_len + len(s) + 1 <= overlap:
+                    overlap_sentences.insert(0, s)
+                    o_len += len(s) + 1
+                else:
+                    break
+            current_chunk = overlap_sentences + [sentence]
+            current_length = sum(len(x) + 1 for x in current_chunk)
+        else:
+            current_chunk.append(sentence)
+            current_length += len(sentence) + 1
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+
+    return [c for c in chunks if c.strip()]
+
+def save_uploaded_file(bytes_data, filename, db_path=DB_PATH):
+    # Tablo kontrolünü yap ve hazırla
+    setup_database(db_path)
+
+    fn_lower = filename.lower()
+    if fn_lower.endswith(".pdf"):
+        raw_text = extract_text_from_pdf(bytes_data)
+    elif fn_lower.endswith(".docx") or fn_lower.endswith(".doc"):
+        raw_text = extract_text_from_docx(bytes_data)
+    else:
+        raw_text = bytes_data.decode("utf-8", errors="ignore")
+
+    clean_text = fix_spaced_text(raw_text)
+
+    if not clean_text:
+        return 0
+
+    chunks = chunk_text_smart(clean_text, target_size=400, overlap=50)
+
+    conn = sqlite3.connect(db_path, timeout=10)
     cursor = conn.cursor()
-
-    # Önceki verileri temizleyelim (tekrar çalıştırmalarda mükerrer kayıt olmasın)
-    cursor.execute("DELETE FROM dokumanlar")
 
     for chunk in chunks:
-        cursor.execute("INSERT INTO dokumanlar (metin) VALUES (?)", (chunk,))
+        if chunk.strip():
+            cursor.execute("INSERT INTO documents (filename, chunk) VALUES (?, ?)", (filename, chunk))
 
     conn.commit()
     conn.close()
-    print(f"Toplam {len(chunks)} metin parçası veritabanına başarıyla kaydedildi.")
 
-if __name__ == "__main__":
-    init_db()
-    process_and_save_data("data/bilgiler.txt")
+    return len(chunks)
     
+if __name__ == "__main__":
+    setup_database()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM documents")
+    count = c.fetchone()[0]
+    conn.close()
+    print(f"✅ Ingest servisi hazır! Veritabanında şu an {count} adet doküman parçası (chunk) mevcut.")

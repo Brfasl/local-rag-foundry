@@ -1,43 +1,53 @@
+import os
 import sqlite3
 
-DB_NAME = "veritabani.db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rag_data.db")
 
-def get_relevant_chunks(query, top_k=2):
-    """
-    Soru ile veritabanındaki metin parçalarını karşılaştırır 
-    ve en alakalı olan top_k kadar parçayı getirir.
-    """
-    conn = sqlite3.connect(DB_NAME)
+def get_relevant_chunks(query, top_k=5, db_path=DB_PATH):
+    conn = sqlite3.connect(db_path, timeout=10)
+
     cursor = conn.cursor()
-    
-    cursor.execute("SELECT id, metin FROM dokumanlar")
-    rows = cursor.fetchall()
+    try:
+        cursor.execute("SELECT chunk FROM documents")
+        rows = cursor.fetchall()
+    except Exception:
+        rows = []
     conn.close()
-
+    
     if not rows:
         return []
 
-    # Basit ve etkili anlamsal/kelime eşleşme skoru
-    query_words = set(query.lower().split())
+    query_words = [w.lower() for w in query.split() if len(w) > 1]
+    
     scored_chunks = []
+    for row in rows:
+        chunk_text = row[0]
+        chunk_lower = chunk_text.lower()
+        score = sum(1 for word in query_words if word in chunk_lower)
+        scored_chunks.append((score, chunk_text))
 
-    for row_id, metin in rows:
-        metin_words = set(metin.lower().split())
-        # Soru kelimeleri ile metin kelimelerinin kesişim sayısı
-        score = len(query_words.intersection(metin_words))
-        scored_chunks.append((score, metin))
-
-    # Skora göre büyükten küçüğe sıralıyoruz
     scored_chunks.sort(key=lambda x: x[0], reverse=True)
-    
-    # En alakalı top_k parçayı döndürüyoruz
-    return [chunk for score, chunk in scored_chunks[:top_k]]
 
-if __name__ == "__main__":
-    test_soru = "RAG mimarisi nedir?"
-    bulunan_parcalar = get_relevant_chunks(test_soru)
-    
-    print(f"Soru: {test_soru}\n")
-    print("Bulunan Alakalı Parçalar:")
-    for idx, parca in enumerate(bulunan_parcalar, 1):
-        print(f"{idx}. {parca}")
+    matching_chunks = [chunk for score, chunk in scored_chunks if score > 0]
+
+    if matching_chunks:
+        if len(matching_chunks) < top_k:
+            remaining_chunks = [chunk for score, chunk in scored_chunks if score == 0]
+            chunks = matching_chunks + remaining_chunks[: (top_k - len(matching_chunks))]
+        else:
+            chunks = matching_chunks[:top_k]
+    else:
+        chunks = [chunk for score, chunk in scored_chunks[:top_k]]
+
+    return chunks[:top_k]
+
+def get_all_chunks(db_path=DB_PATH):
+    conn = sqlite3.connect(db_path, timeout=10)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT chunk FROM documents")
+        rows = cursor.fetchall()
+    except Exception:
+        rows = []
+    conn.close()
+    return [row[0] for row in rows]
